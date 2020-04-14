@@ -1,0 +1,240 @@
+---
+title: "Analysis of Wadman 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require(tidyverse)
+require(purrr)
+require(magrittr)
+```
+
+
+
+#Data extraction 
+
+```{r defineMuscles}
+muscles_list <- c(
+  paste("Finger flexors", c("R", "L"), sep = "_"),#
+  paste("Wrist flexors", c("R", "L"), sep = "_"),#
+  paste("Finger extensors", c("R", "L"), sep = "_"),#
+  paste("Wrist extensors", c("R", "L"), sep = "_"),#
+  paste("Biceps brachii", c("R", "L"), sep = "_"),#
+  paste("Finger spreaders", c("R", "L"), sep = "_"),#
+  paste("Plantar flexors", c("R", "L"), sep = "_"),#
+  paste("Anterior tibial", c("R", "L"), sep = "_"),#
+  paste("Gluteus medius", c("R", "L"), sep = "_"),#
+  paste("Gluteus maximus", c("R", "L"), sep = "_"),#
+  paste("Infrasupinatus", c("R", "L"), sep = "_"),#
+  paste("Deltoid", c("R", "L"), sep = "_"),#
+  paste("Harmstrings", c("R", "L"), sep = "_"),
+  paste("Triceps", c("R", "L"), sep = "_"),#
+  paste("Adductors", c("R", "L"), sep = "_"),#
+  paste("Quadriceps", c("R", "L"), sep = "_"),#
+  paste("Iliopsoas", c("R", "L"), sep = "_")#
+)
+```
+
+## Read heatmap 
+
+![](heatmap.jpg)
+
+```{r fig.height=6, fig.width=6}
+heatmap_imported <- jpeg::readJPEG("heatmap_matrix.jpg") %>%
+  as_tibble() %>%
+  mutate(row = row_number()) %>%
+  gather(-row, key = "col", value="intensity") %>%
+  mutate(col = str_remove(col, "V") %>% as.integer())
+
+patients_assim <- tibble(col = 1:1790,
+                         patients_id=rep_len(rep(1:300, each=10), length.out = 1790 ))
+
+muscle_assim <- tibble(row = 1:2200,
+                         muscle_id=rep_len(rep(1:300, each=65), length.out = 2200 ))
+
+heatmap_annotated <- heatmap_imported%>%
+  left_join(patients_assim, by="col") %>% 
+  left_join(muscle_assim, by="row") %>%
+  group_by(patients_id, muscle_id) %>%
+  summarise(intensity= 1-median(intensity)) %>% 
+  ungroup() %>% 
+  mutate(intensity = intensity/max(intensity)) %>%
+  rowwise() %>%
+  mutate(muscle = muscles_list[muscle_id]) %>%
+  ungroup() %>%
+  mutate(muscle = factor(muscle, levels=muscles_list)) %>%
+  mutate(intensity = round(intensity * 5, digits=0))
+
+heatmap_annotated  %>%
+  ggplot(aes(x=patients_id, y=reorder(muscle, desc(muscle)))) +
+  geom_tile(aes(fill=intensity)) + 
+  scale_fill_gradient2(low="white", high="red", mid="yellow", midpoint = 2.5)  + 
+  scale_y_discrete(position = "right") +
+  theme(axis.title.y = element_blank())
+
+```
+
+# Analysis
+
+## Segmentation
+
+the paper claims that there is no segmentation observed based on the MRC analysis, with no further comments or description of the method used to investigate this statement.
+One of the possible way of doing so would be to associate each muscle with its nerve root and to look, statistically, if there is a segmentation pattern like it was stated in Deymeer 2008. 
+
+```{r}
+
+muscles_levels_innervation <- readODS::read_ods("innervationMuscles.ods")
+
+doc_anatomy <- read_lines("spinalcord_annotated.svg") %>%
+  tibble(lines=.) %>%
+  mutate(nrow=row_number()) 
+
+file_groups_id <- doc_anatomy %>%
+  filter(str_detect(lines, "inkscape:label")) %>%
+  filter(str_detect(lines, "vertebra")) %>%
+  mutate(lines = str_remove(lines, "inkscape:label=\"quanti_vertebra_")) %>%
+  mutate(group = str_remove(lines, "\"")) %>%
+  select(group, nrow)
+
+file_groups_regions <- doc_anatomy %>%
+  filter(str_detect(lines, "<g|</g")) %>%
+  mutate(lines = str_remove_all(lines, " ")) %>%
+  mutate(ngroup = row_number()) %>%
+  filter(!ngroup==min(ngroup) & !ngroup==max(ngroup)) %>%
+  mutate(ngroup = rep_len(rep(1:100, each=2), length.out = length(ngroup))) %>%
+  spread(lines, nrow) %>%
+  rowwise() %>%
+  mutate(nrow = `<g`:`</g>` %>% paste(collapse = ",")) %>%
+  ungroup() %>%
+  separate_rows(nrow, sep=",") %>%
+  select(ngroup, nrow) %>%
+  mutate(nrow=as.integer(nrow))
+
+doc_anatomy <- doc_anatomy %>%
+  left_join(file_groups_regions, by="nrow") %>%
+  left_join(file_groups_id, by="nrow") %>%
+  group_by(ngroup) %>%
+  mutate(group = paste(sort(group), collapse=",")) %>%
+  mutate(group = str_remove_all(group, " ")) 
+
+labels_group <- doc_anatomy %$% unique(group)[-1]
+
+colfunc <- colorRampPalette(c("red", "bisque"))
+cols_rol <- c("#FF0000","#FF1100","#FF2300","#FF3400","#FF4600","#FF5700","#FF6900","#FF7B00","#FF8C00","#FF9E00","#FFAF00","#FFC100","#FFD300","#FFE400","#FFF600","#F7FF00","#E5FF00","#D4FF00","#C2FF00","#B0FF00","#9FFF00","#8DFF00","#7CFF00","#6AFF00","#58FF00","#47FF00","#35FF00","#24FF00","#12FF00","#00FF00")
+
+
+max_intensity <- max(heatmap_annotated$intensity)
+
+data_patients  <-  heatmap_annotated %>%
+  separate(muscle, sep="_", into=c("muscle", "side")) %>%
+  left_join(muscles_levels_innervation, by="muscle") %>%
+  separate_rows(innervation_level, sep=",") %>%
+  separate(innervation_level, sep="-", fill = "right", into=c("level", "coeff")) %>%
+  mutate(coeff= as.double(coeff)) %>%
+  mutate(coeff = replace_na(coeff, 1)) %>%
+  ungroup() %>%
+  group_by(patients_id) %>%
+  mutate(maxintensity = sum(intensity)) %>%
+  ungroup() %>%
+  arrange(maxintensity) %>%
+  mutate(patients_g = rep(1:179, each=88))
+
+
+fun.Line <- function(x){
+line <- filter(doc_anatomy, str_detect(lines, x)) %$% nrow
+if (length(line)<1) {
+  return(NA)
+}else{
+  return(line)
+}
+}
+
+drawMyVertebra <- function(x){
+  data_ind <- data_patients %>%
+  filter(patients_g==x) %>%
+  group_by(level, maxintensity) %>%
+  summarise(intensity = sum(intensity*coeff)/sum(coeff)) %>%
+  spread(level, intensity) %>%
+  mutate(C7 = (C7 + C8 * .5)/1.5, T1 = (T1 + C8 * .5)/1.5) %>%
+  gather(-maxintensity, key="level", value="intensity") 
+  
+
+  values_mucles <- data_patients %>%
+  filter(patients_g == x) %>%
+  group_by(muscle) %>%
+  summarise(score = mean(intensity)) %>%
+  rename(key=muscle)%>%
+  mutate(id = paste(key,"score", sep="_"))
+  
+  values_levels <- data_ind %>%
+  mutate(score = round(intensity, digits=1)) %>%
+  rename(key=level) %>%
+  mutate(id = paste("mean", key, sep="_"))
+
+  text_replace <- bind_rows(values_mucles, values_levels) %>%
+  mutate(score=as.character(score)) %>%
+  bind_rows(tibble(id = "today_date", score = as.character(Sys.Date()))) %>%
+  rowwise() %>%
+  mutate(nrow = fun.Line(id)) 
+  
+data_group <- tibble(level = labels_group) %>% 
+  mutate(baseline=1) %>% 
+  rowwise() %>%
+  left_join(data_ind, by="level") %>%
+  ungroup() %>%
+  mutate(intensity = round(intensity/5*30)) %>%
+  mutate(intensity = case_when(intensity > 30 ~ 30, 
+                               intensity < 1 ~ 1,
+                               T~intensity)) %>%
+  mutate(color = cols_rol[intensity]) %>%
+  mutate(color = replace_na(color, "#D3D3D3")) %>%
+  rename(group=level)
+
+  left_join(doc_anatomy, data_group, by="group") %>%
+  mutate(lines = case_when(!is.na(intensity) & str_detect(lines, "fill:#.{6}") ~ str_replace(lines, "fill:#.{6}", paste0("fill:",color)),
+                           T~lines)) %>%
+  ungroup() %>%
+  mutate(maxintensity = unique(maxintensity[!is.na(maxintensity)])) %>%
+  rowwise() %>%
+  mutate(lines = case_when(str_detect(lines, "patient_id") ~ str_replace(lines, "patient_id", as.character(x)),
+                           str_detect(lines, "pat_score") ~ str_replace(lines, "pat_score", as.character(unique(maxintensity))), 
+                           T~lines)) %>%
+  left_join(text_replace, by="nrow") %>%
+  rowwise() %>%
+  mutate(lines = case_when(!is.na(score)~str_replace(lines, id, as.character(score)), T~lines)) %$%
+    write_lines(lines, paste0("patients/spinalCord_id",str_pad(x,3, pad="0"),".svg"))
+  
+  return(paste("Done patient", x))
+}
+
+
+map(1:179, ~drawMyVertebra(.x))
+
+```
+
+
+```{bash}
+cd patients/
+for FILE in *.svg
+do
+ inkscape $FILE --export-pdf=$FILE.pdf 
+done
+pdftk *.pdf cat output allPatients.pdf
+rm *.svg.pdf
+```
+
+```{r fig.width=3.5, fig.height=3}
+
+heatmap_annotated %>%
+  group_by(patients_id) %>%
+  summarise(intensity = sum(intensity)) %>%
+  arrange(intensity) %>%
+  ungroup() %>%
+  mutate(patients_id=1:179) %>%
+  ggExtra::ggMarginal(data = ., x = "patients_id", y="intensity", type = "histogram", margins = "y", fill="cornflowerblue") 
+ 
+
+```
+
+
